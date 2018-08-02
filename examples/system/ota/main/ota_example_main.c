@@ -23,9 +23,11 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#define EXAMPLE_MAX_STA_CONN 1
 #define EXAMPLE_WIFI_SSID CONFIG_WIFI_SSID
 #define EXAMPLE_WIFI_PASS CONFIG_WIFI_PASSWORD
-#define EXAMPLE_SERVER_IP   CONFIG_SERVER_IP
+//#define EXAMPLE_SERVER_IP   CONFIG_SERVER_IP
+#define EXAMPLE_SERVER_IP   "192.168.4.2"
 #define EXAMPLE_SERVER_PORT CONFIG_SERVER_PORT
 #define EXAMPLE_FILENAME CONFIG_EXAMPLE_FILENAME
 #define BUFFSIZE 1024
@@ -58,6 +60,20 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     case SYSTEM_EVENT_STA_GOT_IP:
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         break;
+    case SYSTEM_EVENT_AP_STAIPASSIGNED:
+    	xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+    	break;
+    case SYSTEM_EVENT_AP_STACONNECTED:
+        ESP_LOGI(TAG, "station:"MACSTR" join, AID=%d",
+                 MAC2STR(event->event_info.sta_connected.mac),
+                 event->event_info.sta_connected.aid);
+        break;
+    case SYSTEM_EVENT_AP_STADISCONNECTED:
+        ESP_LOGI(TAG, "station:"MACSTR"leave, AID=%d",
+                 MAC2STR(event->event_info.sta_disconnected.mac),
+                 event->event_info.sta_disconnected.aid);
+        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
         /* This is a workaround as ESP32 WiFi libs don't currently
            auto-reassociate. */
@@ -78,16 +94,40 @@ static void initialise_wifi(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
     ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+
+    // stop DHCP server
+    ESP_ERROR_CHECK(tcpip_adapter_dhcps_stop(TCPIP_ADAPTER_IF_AP));
+
+    // assign a static IP to the network interface
+    tcpip_adapter_ip_info_t info;
+    memset(&info, 0, sizeof(info));
+    IP4_ADDR(&info.ip, 192, 168, 4, 1);
+    IP4_ADDR(&info.gw, 192, 168, 4, 1);
+    IP4_ADDR(&info.netmask, 255, 255, 255, 0);
+    ESP_ERROR_CHECK(tcpip_adapter_set_ip_info(TCPIP_ADAPTER_IF_AP, &info));
+
+    // start the DHCP server
+    ESP_ERROR_CHECK(tcpip_adapter_dhcps_start(TCPIP_ADAPTER_IF_AP));
+
     wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_WIFI_SSID,
-            .password = EXAMPLE_WIFI_PASS,
-        },
-    };
-    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", wifi_config.sta.ssid);
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
-    ESP_ERROR_CHECK( esp_wifi_start() );
+            .ap = {
+                .ssid = EXAMPLE_WIFI_SSID,
+                .ssid_len = strlen(EXAMPLE_WIFI_SSID),
+                .password = EXAMPLE_WIFI_PASS,
+                .max_connection = EXAMPLE_MAX_STA_CONN,
+                .authmode = WIFI_AUTH_WPA_WPA2_PSK
+            },
+        };
+        if (strlen(EXAMPLE_WIFI_PASS) == 0) {
+            wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+        }
+
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &wifi_config));
+        ESP_ERROR_CHECK(esp_wifi_start());
+
+        ESP_LOGI(TAG, "wifi_init_softap finished.SSID:%s password:%s",
+                 EXAMPLE_WIFI_SSID, EXAMPLE_WIFI_PASS);
 }
 
 /*read buffer by byte still delim ,return read bytes counts*/
