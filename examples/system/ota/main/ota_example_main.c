@@ -42,6 +42,7 @@ static char text[BUFFSIZE + 1] = { 0 };
 static int binary_file_length = 0;
 /*socket id*/
 static int socket_id = -1;
+static bool join_ap = false;
 
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -55,10 +56,12 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
     switch (event->event_id) {
     case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
+    	if (join_ap)
+    		esp_wifi_connect();
         break;
     case SYSTEM_EVENT_STA_GOT_IP:
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        ESP_LOGI(TAG, "got ip");
         break;
     case SYSTEM_EVENT_AP_STAIPASSIGNED:
     	xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
@@ -77,7 +80,8 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     case SYSTEM_EVENT_STA_DISCONNECTED:
         /* This is a workaround as ESP32 WiFi libs don't currently
            auto-reassociate. */
-        esp_wifi_connect();
+    	if (join_ap)
+    		esp_wifi_connect();
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
         break;
     default:
@@ -86,14 +90,78 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
+// start as station, connect to any Snap_XXXX
+void wifi_init_sta()
+{
+    wifi_event_group = xEventGroupCreate();
+    wifi_ap_record_t scan_results[20];
+    uint16_t num_scans = 20;
+
+    tcpip_adapter_init();
+    ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL) );
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = EXAMPLE_WIFI_SSID,
+            .password = EXAMPLE_WIFI_PASS
+        },
+    };
+    wifi_scan_config_t scan_config;
+	scan_config.ssid = 0;
+	scan_config.bssid = 0;
+	scan_config.channel = 6;
+	scan_config.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+	scan_config.scan_time.passive = 1000;
+	scan_config.scan_time.active.min = 100;
+	scan_config.scan_time.active.max = 1000; // 1.5 sec
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
+    //ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_start() );
+
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true) );
+
+    ESP_LOGI(TAG, "scan completed");
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&num_scans, scan_results) );
+    ESP_ERROR_CHECK(esp_wifi_stop() );
+
+    for (int i=0; i < num_scans; i++)
+    {
+    	ESP_LOGI(TAG, "num:%d,ssid:%s",i,scan_results[i].ssid);
+    	if (scan_results[i].ssid[0] == 'S' && scan_results[i].ssid[1] == 'n' && scan_results[i].ssid[2] == 'a' && scan_results[i].ssid[3] == 'p')
+    	{
+    		strcpy((char*)wifi_config.sta.ssid, (const char*)scan_results[i].ssid);
+    		join_ap = true;
+    		break;
+    	}
+    }
+
+    if (join_ap)
+    {
+		ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+		ESP_ERROR_CHECK(esp_wifi_start() );
+
+		ESP_LOGI(TAG, "wifi_init_sta finished.");
+		ESP_LOGI(TAG, "connect to ap SSID:%s password:%s",
+				 wifi_config.sta.ssid, EXAMPLE_WIFI_PASS);
+    }
+    else
+    {
+
+    }
+}
+
 static void initialise_wifi(void)
 {
-    tcpip_adapter_init();
-    wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+    //tcpip_adapter_init();
+    //wifi_event_group = xEventGroupCreate();
+    //ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
+    //wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    //ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
+    //ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
 
     // stop DHCP server
     ESP_ERROR_CHECK(tcpip_adapter_dhcps_stop(TCPIP_ADAPTER_IF_AP));
@@ -350,6 +418,14 @@ void app_main()
     }
     ESP_ERROR_CHECK( err );
 
-    initialise_wifi();
-    xTaskCreate(&ota_example_task, "ota_example_task", 8192, NULL, 5, NULL);
+    // try connect to snap
+    wifi_init_sta();
+    // if failed, turn to AP for config/OTA
+    if (!join_ap)
+    {
+    	initialise_wifi();
+    	xTaskCreate(&ota_example_task, "ota_example_task", 8192, NULL, 5, NULL);
+    } else {
+
+    }
 }
