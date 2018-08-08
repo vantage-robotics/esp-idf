@@ -7,6 +7,7 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 #include <string.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 #include <netdb.h>
 
@@ -19,9 +20,14 @@
 #include "esp_event_loop.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "driver/uart.h"
+#include "soc/uart_struct.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#include "ubx.h"
+extern uint32_t pvtUpdates;
 
 #define EXAMPLE_MAX_STA_CONN 1
 #define EXAMPLE_WIFI_SSID CONFIG_WIFI_SSID
@@ -33,7 +39,10 @@
 #define BUFFSIZE 1024
 #define TEXT_BUFFSIZE 1024
 
+ubx_payload_rx_nav_pvt_t _currPvt;
+
 static const char *TAG = "ota";
+
 /*an ota data write buffer ready to write to the flash*/
 static char ota_write_data[BUFFSIZE + 1] = { 0 };
 /*an packet receive buffer*/
@@ -405,6 +414,27 @@ static void ota_example_task(void *pvParameter)
     return ;
 }
 
+static void gps_task(void *pvParameter)
+{
+	static uint32_t lastPvtUpdates = 0;
+	char payload = "hello";
+	static const char *RX_TASK_TAG = "RX_TASK";
+	esp_log_level_set(RX_TASK_TAG, ESP_LOG_DEBUG);
+
+	while(1)
+	{
+		receive(10);
+
+		if (pvtUpdates > lastPvtUpdates)
+		{
+			lastPvtUpdates = pvtUpdates;
+			 ESP_LOGI(TAG, "gps update");
+		}
+		vTaskDelay( 50 / portTICK_PERIOD_MS );
+
+	}
+}
+
 void app_main()
 {
     // Initialize NVS.
@@ -426,6 +456,9 @@ void app_main()
     	initialise_wifi();
     	xTaskCreate(&ota_example_task, "ota_example_task", 8192, NULL, 5, NULL);
     } else {
-
+    	configure_pam(&_currPvt);
+    	ESP_LOGI(TAG, "gps initialized");
+    	xTaskCreate(&gps_task, "gps_rx_task", 4096, NULL, configMAX_PRIORITIES, NULL);
+    	ESP_LOGI(TAG, "gps task created");
     }
 }
