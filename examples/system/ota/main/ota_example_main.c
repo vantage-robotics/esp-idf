@@ -25,6 +25,7 @@
 
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "mavlink.h"
 
 #include "ubx.h"
 extern uint32_t pvtUpdates;
@@ -52,7 +53,7 @@ static int binary_file_length = 0;
 /*socket id*/
 static int socket_id = -1;
 static bool join_ap = false;
-
+char my_ip[32];
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
 
@@ -70,6 +71,7 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
         break;
     case SYSTEM_EVENT_STA_GOT_IP:
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        sprintf(my_ip,IPSTR, IP2STR(&event->event_info.got_ip.ip_info.ip));
         ESP_LOGI(TAG, "got ip");
         break;
     case SYSTEM_EVENT_AP_STAIPASSIGNED:
@@ -416,10 +418,62 @@ static void ota_example_task(void *pvParameter)
 
 static void gps_task(void *pvParameter)
 {
+	#define udpAddress "192.168.20.1"
+	const int udpPort = 44444;
 	static uint32_t lastPvtUpdates = 0;
-	char payload = "hello";
 	static const char *RX_TASK_TAG = "RX_TASK";
 	esp_log_level_set(RX_TASK_TAG, ESP_LOG_DEBUG);
+
+    int socket_fd;
+    struct sockaddr_in sa,ra;
+
+    int sent_data;
+
+    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
+                        false, true, portMAX_DELAY);
+
+    /* Creates an UDP socket (SOCK_DGRAM) with Internet Protocol Family (PF_INET).
+     * Protocol family and Address family related. For example PF_INET Protocol Family and AF_INET family are coupled.
+    */
+    socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if ( socket_fd < 0 )
+    {
+        printf("socket call failed");
+        exit(0);
+    }
+
+    int yes = 1;
+    if (setsockopt(socket_fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes)) < 0) {
+	  printf("could not set socket option: %d", errno);
+	  exit(0);
+    }
+
+    memset(&sa, 0, sizeof(struct sockaddr_in));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);//inet_addr(my_ip);
+    sa.sin_port = htons(udpPort);
+
+    /* Bind the TCP socket to the port SENDER_PORT_NUM and to the current
+    * machines IP address (Its defined by SENDER_IP_ADDR).
+    * Once bind is successful for UDP sockets application can operate
+    * on the socket descriptor for sending or receiving data.
+    */
+    if (bind(socket_fd, (struct sockaddr *)&sa, sizeof(struct sockaddr_in)) == -1)
+    {
+      printf("Bind to Port Number %d ,IP address %s failed\n",udpPort,my_ip /*SENDER_IP_ADDR*/);
+      close(socket_fd);
+      exit(1);
+    }
+    fcntl(socket_fd, F_SETFL, O_NONBLOCK);
+    printf("Bind to Port Number %d ,IP address %s SUCCESS!!!\n",udpPort,my_ip);
+
+
+
+    memset(&ra, 0, sizeof(struct sockaddr_in));
+    ra.sin_family = AF_INET;
+    ra.sin_addr.s_addr = inet_addr(udpAddress);
+    ra.sin_port = htons(udpPort);
 
 	while(1)
 	{
@@ -428,7 +482,23 @@ static void gps_task(void *pvParameter)
 		if (pvtUpdates > lastPvtUpdates)
 		{
 			lastPvtUpdates = pvtUpdates;
-			 ESP_LOGI(TAG, "gps update");
+
+			mavlink_message_t mavlink_msg_out;
+			char mavBuf[256];
+			float baroAltitude = 0.0f;
+			mavlink_msg_tracker_data_pack(0, 0, &mavlink_msg_out, 6,
+			                                  _currPvt.iTOW, _currPvt.fixType, _currPvt.numSV,
+			                                  _currPvt.lon, _currPvt.lat, (float) _currPvt.height/1000,
+			                                  baroAltitude, _currPvt.velN, _currPvt.velE, _currPvt.velD,
+			                                  _currPvt.sAcc, _currPvt.hAcc, _currPvt.vAcc);
+			uint16_t len = mavlink_msg_to_send_buffer((uint8_t *) mavBuf, &mavlink_msg_out);
+
+			sent_data = sendto(socket_fd, mavBuf, (size_t)len, 0, (struct sockaddr*)&ra, sizeof(ra));
+
+			if(sent_data<0)
+				ESP_LOGI(TAG,"gps update, udp error:%d,size:%d",errno,sizeof(ra));
+			else
+				ESP_LOGI(TAG, "gps update, sent %d bytes on udp",sent_data);
 		}
 		vTaskDelay( 50 / portTICK_PERIOD_MS );
 

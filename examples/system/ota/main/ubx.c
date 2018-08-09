@@ -430,7 +430,6 @@ int receive(const unsigned timeout)
 
   if (bytesRead)
   {
-    ESP_LOGI(TAG, "bytesread:%d",bytesRead);
     for (int i = 0; i < bytesRead; i++)
     {
       handled |= parse_char(buf[i]);
