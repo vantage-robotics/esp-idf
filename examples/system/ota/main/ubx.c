@@ -97,6 +97,18 @@ void			calc_checksum(const uint8_t *buffer, const uint16_t length, ubx_checksum_
 int			wait_for_ack(const uint16_t msg, const unsigned timeout, const bool report);
 
 
+void powerdown_pam(uint8_t on_off)
+{
+	memset(&_buf.payload_tx_rxm_pmreq, 0, sizeof(_buf.payload_tx_rxm_pmreq));
+	_buf.payload_tx_rxm_pmreq.duration = 0;
+	if (on_off)
+		_buf.payload_tx_rxm_pmreq.flags = 2;
+
+	send_message(UBX_MSG_RXM_PMREQ, _buf.raw, sizeof(_buf.payload_tx_rxm_pmreq));
+
+
+}
+
 int configure_pam(ubx_payload_rx_nav_pvt_t *pvt)
 {
   _configured = false;
@@ -209,7 +221,7 @@ int configure_pam(ubx_payload_rx_nav_pvt_t *pvt)
     return 1;
   }
 
-#define UBX_CONFIGURE_SBAS
+//#define UBX_CONFIGURE_SBAS
 #ifdef UBX_CONFIGURE_SBAS
   /* send a SBAS message to set the SBAS options */
   memset(&_buf.payload_tx_cfg_sbas, 0, sizeof(_buf.payload_tx_cfg_sbas));

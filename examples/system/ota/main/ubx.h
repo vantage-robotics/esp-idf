@@ -57,6 +57,7 @@
 
 /* Message Classes */
 #define UBX_CLASS_NAV		0x01
+#define UBX_CLASS_RXM		0x02
 #define UBX_CLASS_ACK		0x05
 #define UBX_CLASS_CFG		0x06
 #define UBX_CLASS_MON		0x0A
@@ -80,9 +81,11 @@
 #define UBX_ID_CFG_SBAS		0x16
 #define UBX_ID_MON_VER		0x04
 #define UBX_ID_MON_HW		0x09
+#define UBX_ID_RXM_PMREQ    0x41
 
 
 /* Message Classes & IDs */
+#define UBX_MSG_RXM_PMREQ ((UBX_CLASS_RXM) | UBX_ID_RXM_PMREQ << 8)
 #define UBX_MSG_NAV_POSLLH	((UBX_CLASS_NAV) | UBX_ID_NAV_POSLLH << 8)
 #define UBX_MSG_NAV_SOL		((UBX_CLASS_NAV) | UBX_ID_NAV_SOL << 8)
 #define UBX_MSG_NAV_PVT		((UBX_CLASS_NAV) | UBX_ID_NAV_PVT << 8)
@@ -404,6 +407,17 @@ typedef struct {
 	uint16_t	reserved5;
 } ubx_payload_tx_cfg_prt_t;
 
+// CFG-RXM
+typedef struct {
+	uint8_t eight;
+	uint8_t lpMode;
+} ubx_payload_tx_cfg_rxm_t;
+
+typedef struct {
+	uint32_t duration;
+	uint32_t flags;
+} ubx_payload_tx_rxm_pmreq_t;
+
 /* Tx CFG-RATE */
 typedef struct {
 	uint16_t	measRate;	/**< Measurement Rate, GPS measurements are taken every measRate milliseconds */
@@ -503,6 +517,7 @@ typedef union {
 	ubx_payload_tx_cfg_sbas_t		payload_tx_cfg_sbas;
 	ubx_payload_tx_cfg_msg_t		payload_tx_cfg_msg;
 	ubx_payload_tx_cfg_gnss_t		payload_tx_cfg_gnss;
+	ubx_payload_tx_rxm_pmreq_t      payload_tx_rxm_pmreq;
 	uint8_t					raw[100];
 } ubx_buf_t;
 
@@ -541,6 +556,7 @@ typedef enum {
 
 int receive(const unsigned timeout);
 int configure_pam(ubx_payload_rx_nav_pvt_t *pvt);
+void powerdown_pam(uint8_t on_off);
 
 
 

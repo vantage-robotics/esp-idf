@@ -21,6 +21,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "driver/uart.h"
+#include "driver/ledc.h"
 #include "soc/uart_struct.h"
 
 #include "nvs.h"
@@ -28,6 +29,9 @@
 #include "mavlink.h"
 
 #include "ubx.h"
+#include "ms5611.h"
+#include "bq27421.h"
+
 extern uint32_t pvtUpdates;
 
 #define EXAMPLE_MAX_STA_CONN 1
@@ -43,6 +47,8 @@ extern uint32_t pvtUpdates;
 ubx_payload_rx_nav_pvt_t _currPvt;
 
 static const char *TAG = "ota";
+ms5611_t baro;
+bq27421_t gauge;
 
 /*an ota data write buffer ready to write to the flash*/
 static char ota_write_data[BUFFSIZE + 1] = { 0 };
@@ -53,6 +59,9 @@ static int binary_file_length = 0;
 /*socket id*/
 static int socket_id = -1;
 static bool join_ap = false;
+static bool charging = false;
+static bool connected = false;
+static float baroAltitude = 0.0f;
 char my_ip[32];
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -61,6 +70,35 @@ static EventGroupHandle_t wifi_event_group;
    but we only care about one event - are we connected
    to the AP with an IP? */
 const int CONNECTED_BIT = BIT0;
+
+#define LEDC_TEST_CH_NUM 3
+#define LEDC_TEST_FADE_TIME    (50)
+#define LEDC_OFF_DUTY 8192
+#define LEDC_BRIGHT_DUTY 4000
+
+ledc_channel_config_t ledc_channel[LEDC_TEST_CH_NUM] = {
+        {
+            .channel    = LEDC_CHANNEL_0,
+            .duty       = 0,
+            .gpio_num   = 19,
+            .speed_mode = LEDC_HIGH_SPEED_MODE,
+            .timer_sel  = LEDC_TIMER_0
+        },
+        {
+            .channel    = LEDC_CHANNEL_1,
+            .duty       = 0,
+            .gpio_num   = 22,
+            .speed_mode = LEDC_HIGH_SPEED_MODE,
+            .timer_sel  = LEDC_TIMER_0
+        },
+        {
+            .channel    = LEDC_CHANNEL_2,
+            .duty       = 0,
+            .gpio_num   = 27,
+            .speed_mode = LEDC_HIGH_SPEED_MODE,
+            .timer_sel  = LEDC_TIMER_0
+        },
+    };
 
 static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
@@ -71,11 +109,13 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
         break;
     case SYSTEM_EVENT_STA_GOT_IP:
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+        connected = true;
         sprintf(my_ip,IPSTR, IP2STR(&event->event_info.got_ip.ip_info.ip));
         ESP_LOGI(TAG, "got ip");
         break;
     case SYSTEM_EVENT_AP_STAIPASSIGNED:
     	xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+    	connected = true;
     	break;
     case SYSTEM_EVENT_AP_STACONNECTED:
         ESP_LOGI(TAG, "station:"MACSTR" join, AID=%d",
@@ -87,6 +127,7 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
                  MAC2STR(event->event_info.sta_disconnected.mac),
                  event->event_info.sta_disconnected.aid);
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        connected = false;
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
         /* This is a workaround as ESP32 WiFi libs don't currently
@@ -94,6 +135,7 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     	if (join_ap)
     		esp_wifi_connect();
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        connected = false;
         break;
     default:
         break;
@@ -318,8 +360,20 @@ static void ota_example_task(void *pvParameter)
     /* Wait for the callback to set the CONNECTED_BIT in the
        event group.
     */
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
-                        false, true, portMAX_DELAY);
+    while (!connected)
+    {
+    	if (gpio_get_level(35) == 0)
+    	{
+    		charging = true;
+    		esp_wifi_stop();
+    		vTaskSuspend(NULL);
+    	}
+    	vTaskDelay( 100 / portTICK_PERIOD_MS );
+    	ESP_LOGI(TAG, ".");
+    }
+    //xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
+    //                    false, true, portMAX_DELAY);
+
     ESP_LOGI(TAG, "Connect to Wifi ! Start to Connect to Server....");
 
     /*connect to http server*/
@@ -415,7 +469,83 @@ static void ota_example_task(void *pvParameter)
     esp_restart();
     return ;
 }
+static void charging_task(void *pvParameter)
+{
+	static bool was_charging = false;
+	int ch;
+	static int brightness = 8000;
 
+	while(1)
+	{
+		if (charging && !was_charging)
+		{
+			ESP_LOGI(TAG, "starting charge power down");
+			was_charging = charging;
+			powerdown_pam(1);
+			for (ch = 0; ch < 3; ch++) {
+				ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 8192);
+				ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+			}
+			esp_sleep_enable_timer_wakeup(500);
+		}
+
+		if (charging)
+		{
+			//ESP_LOGI(TAG, "charging");
+			brightness -= 1;
+			if (brightness < 5000)
+				brightness = 8000;
+			for (ch = 0; ch < 1; ch++) {
+				ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, brightness);
+				ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+			}
+
+			esp_light_sleep_start();
+
+			for (ch = 0; ch < 1; ch++) {
+				ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, brightness);
+				ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+			}
+
+		}
+
+		charging = !gpio_get_level(35);
+
+		if (!charging && was_charging)
+			esp_restart();
+
+		if (!charging)
+			vTaskDelay( 1000 / portTICK_PERIOD_MS );
+	}
+
+}
+static void i2c_task(void *pvParameter)
+{
+	int32_t pressure;
+	float temperature;
+	/* tropospheric properties (0-11km) for standard atmosphere */
+	const double T1 = 15.0 + 273.15;	/* temperature at base height in Kelvin */
+	const double a  = -6.5 / 1000.0;	/* temperature gradient in degrees per metre */
+	const double g  = 9.80665;	/* gravity constant in m/s/s */
+	const double R  = 287.05;	/* ideal gas constant in J/kg/K */
+
+	/* current pressure at MSL in kPa */
+	const double p1 = 101325.0 / 1000.0;
+
+	while (1)
+	{
+		ms5611_get_sensor_data(&baro, &pressure, &temperature);
+
+		/* measured pressure in kPa */
+		double p = (double)pressure / 1000.0;
+
+		baroAltitude = (float)((((pow((p / p1), (-(a * R) / g))) * T1) - T1) / a);
+
+		vTaskDelay( 100 / portTICK_PERIOD_MS );
+		ESP_LOGI(TAG, "baro alt:%0.3f", (float)baroAltitude);
+		ESP_LOGI(TAG, "baro pres:%d", pressure);
+	}
+}
 static void gps_task(void *pvParameter)
 {
 	#define udpAddress "192.168.20.1"
@@ -428,6 +558,9 @@ static void gps_task(void *pvParameter)
     struct sockaddr_in sa,ra;
 
     int sent_data;
+    int ch, duty = LEDC_OFF_DUTY;
+
+    ledc_fade_func_install(0);
 
     xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
                         false, true, portMAX_DELAY);
@@ -468,8 +601,6 @@ static void gps_task(void *pvParameter)
     fcntl(socket_fd, F_SETFL, O_NONBLOCK);
     printf("Bind to Port Number %d ,IP address %s SUCCESS!!!\n",udpPort,my_ip);
 
-
-
     memset(&ra, 0, sizeof(struct sockaddr_in));
     ra.sin_family = AF_INET;
     ra.sin_addr.s_addr = inet_addr(udpAddress);
@@ -485,7 +616,7 @@ static void gps_task(void *pvParameter)
 
 			mavlink_message_t mavlink_msg_out;
 			char mavBuf[256];
-			float baroAltitude = 0.0f;
+
 			mavlink_msg_tracker_data_pack(0, 0, &mavlink_msg_out, 6,
 			                                  _currPvt.iTOW, _currPvt.fixType, _currPvt.numSV,
 			                                  _currPvt.lon, _currPvt.lat, (float) _currPvt.height/1000,
@@ -496,15 +627,55 @@ static void gps_task(void *pvParameter)
 			sent_data = sendto(socket_fd, mavBuf, (size_t)len, 0, (struct sockaddr*)&ra, sizeof(ra));
 
 			if(sent_data<0)
-				ESP_LOGI(TAG,"gps update, udp error:%d,size:%d",errno,sizeof(ra));
+				ESP_LOGI(TAG,"gps update, udp error:%d",errno);
 			else
-				ESP_LOGI(TAG, "gps update, sent %d bytes on udp",sent_data);
+			{
+				//ESP_LOGI(TAG, "gps update, sent %d bytes on udp",sent_data);
+
+				if (duty == LEDC_OFF_DUTY)
+					duty = LEDC_BRIGHT_DUTY;
+				else
+					duty = LEDC_OFF_DUTY;
+
+				for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
+					ledc_set_fade_with_time(ledc_channel[ch].speed_mode,
+							ledc_channel[ch].channel, duty, LEDC_TEST_FADE_TIME);
+					ledc_fade_start(ledc_channel[ch].speed_mode,
+							ledc_channel[ch].channel, LEDC_FADE_NO_WAIT);
+				}
+			}
+
 		}
 		vTaskDelay( 50 / portTICK_PERIOD_MS );
 
 	}
 }
+void led_init(void)
+{
+	int ch;
 
+	/*
+	 * Prepare and set configuration of timers
+	 * that will be used by LED Controller
+	 */
+	ledc_timer_config_t ledc_timer = {
+		.duty_resolution = LEDC_TIMER_13_BIT, // resolution of PWM duty
+		.freq_hz = 5000,                      // frequency of PWM signal
+		.speed_mode = LEDC_HIGH_SPEED_MODE,           // timer mode
+		.timer_num = LEDC_TIMER_0            // timer index
+	};
+	// Set configuration of timer0 for high speed channels
+	ledc_timer_config(&ledc_timer);
+
+	// Set LED Controller with previously prepared configuration
+	    for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
+	        ledc_channel_config(&ledc_channel[ch]);
+	        ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 8192);
+	       	ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+	    }
+
+
+}
 void app_main()
 {
     // Initialize NVS.
@@ -520,15 +691,39 @@ void app_main()
 
     // try connect to snap
     wifi_init_sta();
+
+    led_init();
+
+    gpio_set_direction(35, GPIO_MODE_INPUT);
+    xTaskCreate(&charging_task, "charging_task", 2048, NULL, configMAX_PRIORITIES - 5, NULL);
+    ESP_LOGI(TAG, "charging task created");
+
     // if failed, turn to AP for config/OTA
     if (!join_ap)
     {
     	initialise_wifi();
     	xTaskCreate(&ota_example_task, "ota_example_task", 8192, NULL, 5, NULL);
     } else {
+    	 while (i2cdev_init() != ESP_OK)
+    	    {
+    	        printf("Could not init I2Cdev library\n");
+    	        vTaskDelay(250 / portTICK_PERIOD_MS);
+    	    }
+    	//ESP_LOGI(TAG, "gauge init");
+    	//bq27421_init_desc(&gauge, I2C_NUM_0 , GPIO_NUM_5, GPIO_NUM_18);
+    	//bq27421_battery_configure_capacity(&gauge, 0);
+
+    	ESP_LOGI(TAG, "ms5611 init desc");
+    	ms5611_init_desc(&baro, 0x76, I2C_NUM_0 , GPIO_NUM_5, GPIO_NUM_18);
+    	ESP_LOGI(TAG, "ms5611 init");
+    	ms5611_init(&baro, MS5611_OSR_1024);
+
     	configure_pam(&_currPvt);
     	ESP_LOGI(TAG, "gps initialized");
-    	xTaskCreate(&gps_task, "gps_rx_task", 4096, NULL, configMAX_PRIORITIES, NULL);
+    	xTaskCreate(&gps_task, "gps_rx_task", 4096, NULL, configMAX_PRIORITIES - 1, NULL);
     	ESP_LOGI(TAG, "gps task created");
+    	xTaskCreate(&i2c_task, "i2c_task", 2048, NULL, configMAX_PRIORITIES - 2, NULL);
+    	ESP_LOGI(TAG, "i2c task created");
+
     }
 }
