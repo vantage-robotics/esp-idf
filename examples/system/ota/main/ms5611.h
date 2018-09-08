@@ -18,7 +18,7 @@
 #define __MS5611_H__
 
 #include <stdint.h>
-#include "i2cdev.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,15 +52,7 @@ typedef struct
     uint16_t tempsens;   //!< C6 Temperature coefficient of the temperature       | TEMPSENSE
 } ms5611_config_data_t;
 
-/**
- * Device descriptor
- */
-typedef struct
-{
-    i2c_dev_t i2c_dev;                //!< I2C device settings
-    ms5611_osr_t osr;                 //!< Oversampling setting
-    ms5611_config_data_t config_data; //!< Device configuration, filled upon initalize
-} ms5611_t;
+
 
 /**
  * @brief Initialize device descriptior
@@ -71,14 +63,7 @@ typedef struct
  * @param scl_gpio GPIO pin for SCL
  * @return `ESP_OK` on success
  */
-esp_err_t ms5611_init_desc(ms5611_t *dev, uint8_t addr, i2c_port_t port, gpio_num_t sda_gpio, gpio_num_t scl_gpio);
 
-/**
- * @brief Free device descriptor
- * @param dev Device descriptor
- * @return `ESP_OK` on success
- */
-esp_err_t ms5611_free_desc(ms5611_t *dev);
 
 /**
  * @brief Init MS5611-01BA03
@@ -87,7 +72,7 @@ esp_err_t ms5611_free_desc(ms5611_t *dev);
  * @param osr Oversampling ratio
  * @return `ESP_OK` on success
  */
-esp_err_t ms5611_init(ms5611_t *dev, ms5611_osr_t osr);
+esp_err_t ms5611_init(void);
 
 /**
  * @brief Measure pressure and temperature
@@ -96,7 +81,7 @@ esp_err_t ms5611_init(ms5611_t *dev, ms5611_osr_t osr);
  * @param[out] temperature Temperature, degrees Celsius
  * @return `ESP_OK` on success
  */
-esp_err_t ms5611_get_sensor_data(ms5611_t *dev, int32_t *pressure, float *temperature);
+esp_err_t ms5611_get_sensor_data(int32_t *pressure, float *temperature);
 
 #ifdef __cplusplus
 }

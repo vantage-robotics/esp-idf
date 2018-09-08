@@ -15,13 +15,15 @@
  * BSD Licensed as described in the file LICENSE
  */
 #include "ms5611.h"
-
+#include "Wire.h"
 #include <stddef.h>
 #include <esp_system.h>
 #include <esp_log.h>
 
-#define I2C_FREQ_HZ 400000 // 400 kHz
+#define MS5611_I2C_TIMEOUT 2000
+#define OSR MS5611_OSR_1024
 
+#define I2C_ADDRESS 0x76
 #define CMD_CONVERT_D1 0x40
 #define CMD_CONVERT_D2 0x50
 #define CMD_ADC_READ   0x00
@@ -39,9 +41,50 @@
 
 static const char *TAG = "MS5611";
 
-static inline esp_err_t send_command(ms5611_t *dev, uint8_t cmd)
+ms5611_config_data_t config_data;
+
+// Read a specified number of bytes over I2C at a given subAddress
+int16_t _i2cReadBytes(uint8_t subAddress, uint8_t * dest, uint8_t count)
 {
-    return i2c_dev_write(&dev->i2c_dev, NULL, 0, &cmd, 1);
+	int16_t timeout = MS5611_I2C_TIMEOUT;
+	beginTransmission(I2C_ADDRESS);
+	iwrite(subAddress);
+	endTransmission(true);
+
+	requestFrom(I2C_ADDRESS, count, true);
+	while ((available() < count) && timeout--)
+		vTaskDelay(1 / portTICK_PERIOD_MS);
+	if (timeout)
+	{
+		for (int i=0; i<count; i++)
+		{
+			dest[i] = iread();
+		}
+	}
+
+	return timeout?ESP_OK:ESP_ERR_TIMEOUT;
+}
+
+// Write a specified number of bytes over I2C to a given subAddress
+uint16_t _i2cWriteBytes(uint8_t subAddress, uint8_t * src, uint8_t count)
+{
+	beginTransmission(I2C_ADDRESS);
+	iwrite(subAddress);
+	for (int i=0; i<count; i++)
+	{
+		iwrite(src[i]);
+	}
+	endTransmission(true);
+
+	return true;
+}
+
+static inline esp_err_t send_command(uint8_t cmd)
+{
+    //return i2c_dev_write(&dev->i2c_dev, NULL, 0, &cmd, 1);
+	_i2cWriteBytes(cmd, NULL, 0);
+	return ESP_OK;
+
 }
 
 static inline uint16_t shuffle(uint16_t val)
@@ -49,43 +92,43 @@ static inline uint16_t shuffle(uint16_t val)
     return ((val & 0xff00) >> 8) | ((val & 0xff) << 8);
 }
 
-static inline esp_err_t read_prom(ms5611_t *dev)
+static inline esp_err_t read_prom()
 {
     uint16_t tmp;
 
     // FIXME calculate CRC (AN502)
 
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, PROM_ADDR_SENS, &tmp, 2));
-    dev->config_data.sens = shuffle(tmp);
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, PROM_ADDR_OFF, &tmp, 2));
-    dev->config_data.off = shuffle(tmp);
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, PROM_ADDR_TCS, &tmp, 2));
-    dev->config_data.tcs = shuffle(tmp);
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, PROM_ADDR_TCO, &tmp, 2));
-    dev->config_data.tco = shuffle(tmp);
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, PROM_ADDR_T_REF, &tmp, 2));
-    dev->config_data.t_ref = shuffle(tmp);
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, PROM_ADDR_TEMPSENS, &tmp, 2));
-    dev->config_data.tempsens = shuffle(tmp);
+    CHECK(_i2cReadBytes(PROM_ADDR_SENS, &tmp, 2));
+    config_data.sens = shuffle(tmp);
+    CHECK(_i2cReadBytes(PROM_ADDR_OFF, &tmp, 2));
+    config_data.off = shuffle(tmp);
+    CHECK(_i2cReadBytes(PROM_ADDR_TCS, &tmp, 2));
+    config_data.tcs = shuffle(tmp);
+    CHECK(_i2cReadBytes(PROM_ADDR_TCO, &tmp, 2));
+    config_data.tco = shuffle(tmp);
+    CHECK(_i2cReadBytes(PROM_ADDR_T_REF, &tmp, 2));
+    config_data.t_ref = shuffle(tmp);
+    CHECK(_i2cReadBytes(PROM_ADDR_TEMPSENS, &tmp, 2));
+    config_data.tempsens = shuffle(tmp);
 
     return ESP_OK;
 }
 
-static esp_err_t read_adc(ms5611_t *dev, uint32_t *result)
+static esp_err_t read_adc(uint32_t *result)
 {
     uint8_t tmp[3];
 
-    CHECK(i2c_dev_read_reg(&dev->i2c_dev, 0, tmp, 3));
+    CHECK(_i2cReadBytes(0, tmp, 3));
     *result = (tmp[0] << 16) | (tmp[1] << 8) | tmp[2];
 
     // If we are to fast the ADC will return 0 instead of the actual result
     return *result == 0 ? ESP_ERR_INVALID_RESPONSE : ESP_OK;
 }
 
-static void wait_conversion(ms5611_t *dev)
+static void wait_conversion()
 {
     uint32_t us = 8220;
-    switch (dev->osr)
+    switch (OSR)
     {
         case MS5611_OSR_256: us = 500; break;   // 0.5ms
         case MS5611_OSR_512: us = 1100; break;  // 1.1ms
@@ -93,113 +136,77 @@ static void wait_conversion(ms5611_t *dev)
         case MS5611_OSR_2048: us = 4100; break; // 4.1ms
         case MS5611_OSR_4096: us = 8220; break; // 8.22ms
     }
-    //vTaskDelay( (us/1000) / portTICK_PERIOD_MS );
-    ets_delay_us(us);
+    //ESP_LOGI(TAG,"sleeping for:%d ms",us/1000 + 2);
+
+    vTaskDelay( pdMS_TO_TICKS(10));
+    //ets_delay_us(us);
 }
 
-static inline esp_err_t get_raw_temperature(ms5611_t *dev, uint32_t *result)
+static inline esp_err_t get_raw_temperature(uint32_t *result)
 {
-    CHECK(send_command(dev, CMD_CONVERT_D2 + dev->osr));
-    wait_conversion(dev);
-    CHECK(read_adc(dev, result));
+    CHECK(send_command(CMD_CONVERT_D2 + OSR));
+    wait_conversion();
+    CHECK(read_adc(result));
 
     return ESP_OK;
 }
 
-static inline esp_err_t get_raw_pressure(ms5611_t *dev, uint32_t *result)
+static inline esp_err_t get_raw_pressure(uint32_t *result)
 {
-    CHECK(send_command(dev, CMD_CONVERT_D1 + dev->osr));
-    wait_conversion(dev);
-    CHECK(read_adc(dev, result));
+    CHECK(send_command(CMD_CONVERT_D1 + OSR));
+    wait_conversion();
+    CHECK(read_adc(result));
 
     return ESP_OK;
 }
 
-static esp_err_t ms5611_reset(ms5611_t *dev)
+static esp_err_t ms5611_reset()
 {
-    I2C_DEV_TAKE_MUTEX(&dev->i2c_dev);
-    I2C_DEV_CHECK(&dev->i2c_dev, send_command(dev, CMD_RESET));
-    I2C_DEV_GIVE_MUTEX(&dev->i2c_dev);
+    send_command(CMD_RESET);
 
     return ESP_OK;
 }
 
 /////////////////////////Public//////////////////////////////////////
 
-esp_err_t ms5611_init_desc(ms5611_t *dev, uint8_t addr, i2c_port_t port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
+
+esp_err_t ms5611_init()
 {
-    CHECK_ARG(dev);
-
-    if (addr != MS5611_ADDR_CSB_HIGH && addr != MS5611_ADDR_CSB_LOW)
-    {
-        ESP_LOGE(TAG, "Invalid I2C address 0x%02x", addr);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    dev->i2c_dev.port = port;
-    dev->i2c_dev.addr = addr;
-    dev->i2c_dev.cfg.sda_io_num = sda_gpio;
-    dev->i2c_dev.cfg.scl_io_num = scl_gpio;
-    dev->i2c_dev.cfg.master.clk_speed = I2C_FREQ_HZ;
-
-    CHECK(i2c_dev_create_mutex(&dev->i2c_dev));
-
-    return ESP_OK;
-}
-
-esp_err_t ms5611_free_desc(ms5611_t *dev)
-{
-    CHECK_ARG(dev);
-
-    return i2c_dev_delete_mutex(&dev->i2c_dev);
-}
-
-esp_err_t ms5611_init(ms5611_t *dev, ms5611_osr_t osr)
-{
-    CHECK_ARG(dev);
-
-    dev->osr = osr;
-
     // First of all we need to reset the chip
-    CHECK(ms5611_reset(dev));
+    CHECK(ms5611_reset());
     // Wait a bit for the device to reset
-    ets_delay_us(10000);
+    vTaskDelay( pdMS_TO_TICKS(10));
     // Get the config
-    CHECK(read_prom(dev));
+    CHECK(read_prom());
 
     return ESP_OK;
 }
 
-esp_err_t ms5611_get_sensor_data(ms5611_t *dev, int32_t *pressure, float *temperature)
+esp_err_t ms5611_get_sensor_data(int32_t *pressure, float *temperature)
 {
-    CHECK_ARG(dev);
     CHECK_ARG(pressure);
     CHECK_ARG(temperature);
 
-    I2C_DEV_TAKE_MUTEX(&dev->i2c_dev);
-
     // Second order temperature compensation see datasheet p8
     uint32_t raw_pressure = 0;
-    I2C_DEV_CHECK(&dev->i2c_dev, get_raw_pressure(dev, &raw_pressure));
+    get_raw_pressure(&raw_pressure);
 
     uint32_t raw_temperature = 0;
-    I2C_DEV_CHECK(&dev->i2c_dev, get_raw_temperature(dev, &raw_temperature));
-
-    I2C_DEV_GIVE_MUTEX(&dev->i2c_dev);
+    get_raw_temperature(&raw_temperature);
 
     // dT = D2 - T_ref = D2 - C5 * 2^8
-    int32_t dt = raw_temperature - ((int32_t)dev->config_data.t_ref << 8);
+    int32_t dt = raw_temperature - ((int32_t)config_data.t_ref << 8);
     // Actual temerature (-40...85C with 0.01 resulution)
     // TEMP = 20C +dT * TEMPSENSE =2000 + dT * C6 / 2^23
-    int64_t temp = 2000 + (int32_t)(((int64_t)dt * dev->config_data.tempsens) >> 23);
+    int64_t temp = 2000 + (int32_t)(((int64_t)dt * config_data.tempsens) >> 23);
     // Offset at actual temperature
     // OFF=OFF_t1 + TCO * dT = OFF_t1(C2) * 2^16 + (C4*dT)/2^7
-    int64_t off = (int64_t)((int64_t)dev->config_data.off << 16)
-        + (((int64_t)dev->config_data.tco * dt) >> 7);
+    int64_t off = (int64_t)((int64_t)config_data.off << 16)
+        + (((int64_t)config_data.tco * dt) >> 7);
     // Senisitivity at actual temperature
     // SENS=SENS_t1 + TCS *dT = SENS_t1(C1) *2^15 + (TCS(C3) *dT)/2^8
-    int64_t sens = (int64_t)(((int64_t)dev->config_data.sens) << 15)
-        + (((int64_t)dev->config_data.tcs * dt) >> 8);
+    int64_t sens = (int64_t)(((int64_t)config_data.sens) << 15)
+        + (((int64_t)config_data.tcs * dt) >> 8);
 
     // Set defaults for temp >= 2000
     int64_t t_2 = 0;
