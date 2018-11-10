@@ -220,8 +220,55 @@ int configure_pam(ubx_payload_rx_nav_pvt_t *pvt)
   if (wait_for_ack(UBX_MSG_CFG_NAV5, UBX_CONFIG_TIMEOUT, true) < 0) {
     return 1;
   }
+  /* send a GNSS message to set the options for the used constellations, max of 3 simultaneous */
+  	//B5 62 06 3E 3C 00 00 00 20 07 00 08 10 00 01 00
+  	//01 01 01 01 03 00 01 00 01 01 02 04 08 00 01 00
+  	//01 01 03 00 00 00 00 00 00 01 04 00 00 00 00 00
+  	//00 01 05 00 00 00 00 00 00 01 06 08 0E 00 01 00
+  	//01 01 09 B9
 
-//#define UBX_CONFIGURE_SBAS
+  	memset(&_buf.payload_tx_cfg_gnss, 0, sizeof(_buf.payload_tx_cfg_gnss));
+
+  	_buf.payload_tx_cfg_gnss.numTrkChUse = 0x20;
+  	_buf.payload_tx_cfg_gnss.numConfigBlocks = 7;
+  	// GPS
+  	_buf.payload_tx_cfg_gnss.blocks[0].gnssId = 0;
+  	_buf.payload_tx_cfg_gnss.blocks[0].resTrkCh = 10;
+  	_buf.payload_tx_cfg_gnss.blocks[0].maxTrkCh = 16;
+  	_buf.payload_tx_cfg_gnss.blocks[0].flags = 0x00010001;
+  	// SBAS
+  	_buf.payload_tx_cfg_gnss.blocks[1].gnssId = 1;
+  	_buf.payload_tx_cfg_gnss.blocks[1].resTrkCh = 0;
+  	_buf.payload_tx_cfg_gnss.blocks[1].maxTrkCh = 0;
+  	// Galileo
+  	_buf.payload_tx_cfg_gnss.blocks[2].gnssId = 2;
+  	_buf.payload_tx_cfg_gnss.blocks[2].resTrkCh = 5;
+  	_buf.payload_tx_cfg_gnss.blocks[2].maxTrkCh = 8;
+  	_buf.payload_tx_cfg_gnss.blocks[2].flags = 0x00010001;
+  	// Beidou
+  	_buf.payload_tx_cfg_gnss.blocks[3].gnssId = 3;
+  	_buf.payload_tx_cfg_gnss.blocks[3].resTrkCh = 0;
+  	_buf.payload_tx_cfg_gnss.blocks[3].maxTrkCh = 0;
+  	// IMES
+  	_buf.payload_tx_cfg_gnss.blocks[4].gnssId = 4;
+  	_buf.payload_tx_cfg_gnss.blocks[4].resTrkCh = 0;
+  	_buf.payload_tx_cfg_gnss.blocks[4].maxTrkCh = 0;
+  	// QZSS, recommended to be enabled with GPS, guess they are on same frequency
+  	_buf.payload_tx_cfg_gnss.blocks[5].gnssId = 5;
+  	_buf.payload_tx_cfg_gnss.blocks[5].resTrkCh = 0;
+  	_buf.payload_tx_cfg_gnss.blocks[5].maxTrkCh = 0;
+  	// GLONASS
+  	_buf.payload_tx_cfg_gnss.blocks[6].gnssId = 6;
+  	_buf.payload_tx_cfg_gnss.blocks[6].resTrkCh = 8;
+  	_buf.payload_tx_cfg_gnss.blocks[6].maxTrkCh = 14;
+  	_buf.payload_tx_cfg_gnss.blocks[6].flags = 0x00010001;
+
+  	send_message(UBX_MSG_CFG_GNSS, _buf.raw, sizeof(_buf.payload_tx_cfg_gnss));
+
+  	if (wait_for_ack(UBX_MSG_CFG_GNSS, UBX_CONFIG_TIMEOUT, true) < 0) {
+  		return 1;
+  	}
+#define UBX_CONFIGURE_SBAS
 #ifdef UBX_CONFIGURE_SBAS
   /* send a SBAS message to set the SBAS options */
   memset(&_buf.payload_tx_cfg_sbas, 0, sizeof(_buf.payload_tx_cfg_sbas));

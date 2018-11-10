@@ -130,6 +130,7 @@ typedef enum MAV_CMD
 
 // MESSAGE DEFINITIONS
 #include "./mavlink_msg_tracker_data.h"
+#include "./mavlink_msg_tracker_status.h"
 
 
 #undef MAVLINK_THIS_XML_IDX

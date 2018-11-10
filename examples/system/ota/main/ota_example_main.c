@@ -5,6 +5,8 @@
    Unless required by applicable law or agreed to in writing, this
    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
    CONDITIONS OF ANY KIND, either express or implied.
+
+   python2 -m SimpleHTTPServer 8071
 */
 #include <string.h>
 #include <stdbool.h>
@@ -57,6 +59,7 @@ ubx_payload_rx_nav_pvt_t _currPvt;
 
 static const char *TAG = "ota";
 
+time_t power_watchdog;
 
 /*an ota data write buffer ready to write to the flash*/
 static char ota_write_data[BUFFSIZE + 1] = { 0 };
@@ -70,6 +73,14 @@ static bool join_ap = false;
 static bool charging = false;
 static bool connected = false;
 static float baroAltitude = 0.0f;
+uint8_t bat_soc = 0;
+uint16_t bat_v = 0;
+uint8_t bat_i = 0;
+uint8_t bat_health = 0;
+int8_t rssi = 0;
+uint8_t fw_rev = 0;
+uint8_t hw_rev = 0;
+
 char my_ip[32];
 /* FreeRTOS event group to signal when we are connected & ready to make a request */
 static EventGroupHandle_t wifi_event_group;
@@ -82,53 +93,70 @@ const int CONNECTED_BIT = BIT0;
 #define LED1 19
 #define LED2 22
 #define LED3 27
-#define LEDC_TEST_CH_NUM 4
+#define LED4 26
+#define LEDC_TEST_CH_NUM 5
 #define LEDC_TEST_FADE_TIME    (50)
 #define LEDC_OFF_DUTY 8192
 #define LEDC_BRIGHT_DUTY 4000
 
 ledc_channel_config_t ledc_channel[LEDC_TEST_CH_NUM] = {
-        {
-            .channel    = LEDC_CHANNEL_0,
-            .duty       = 0,
-            .gpio_num   = 19,
-            .speed_mode = LEDC_HIGH_SPEED_MODE,
-            .timer_sel  = LEDC_TIMER_0
-        },
+		{
+			.channel    = LEDC_CHANNEL_0,
+			.duty       = 0,
+			.gpio_num   = LED1,
+			.speed_mode = LEDC_HIGH_SPEED_MODE,
+			.timer_sel  = LEDC_TIMER_0
+		},
         {
             .channel    = LEDC_CHANNEL_1,
             .duty       = 0,
-            .gpio_num   = 22,
+            .gpio_num   = LED2,
             .speed_mode = LEDC_HIGH_SPEED_MODE,
             .timer_sel  = LEDC_TIMER_0
         },
         {
             .channel    = LEDC_CHANNEL_2,
             .duty       = 0,
-            .gpio_num   = 27,
+            .gpio_num   = LED3,
+            .speed_mode = LEDC_HIGH_SPEED_MODE,
+            .timer_sel  = LEDC_TIMER_0
+        },
+        {
+            .channel    = LEDC_CHANNEL_3,
+            .duty       = 0,
+            .gpio_num   = LED4,
             .speed_mode = LEDC_HIGH_SPEED_MODE,
             .timer_sel  = LEDC_TIMER_0
         },
 		{
-			.channel    = LEDC_CHANNEL_3,
+			.channel    = LEDC_CHANNEL_4,
 			.duty       = 0,
 			.gpio_num   = BUZ_OUT,
 			.speed_mode = LEDC_HIGH_SPEED_MODE,
-			.timer_sel  = LEDC_TIMER_0
+			.timer_sel  = LEDC_TIMER_1
 		},
     };
 
+static time_t system_seconds(void)
+{
+	struct timeval tv;
+	struct timezone tz;
+
+	gettimeofday(&tv, &tz);
+
+	return tv.tv_sec;
+}
 static void buzz(uint16_t level, uint8_t ramp_ms, uint8_t hold_ms)
 {
-	ledc_set_fade_with_time(ledc_channel[3].speed_mode,
-	ledc_channel[3].channel, level, ramp_ms);
+	ledc_set_fade_with_time(ledc_channel[LEDC_CHANNEL_4].speed_mode,
+	ledc_channel[LEDC_CHANNEL_4].channel, level, ramp_ms);
 	ledc_fade_start(ledc_channel[3].speed_mode,
-	ledc_channel[3].channel, LEDC_FADE_NO_WAIT);
+	ledc_channel[LEDC_CHANNEL_4].channel, LEDC_FADE_NO_WAIT);
 	vTaskDelay(hold_ms / portTICK_PERIOD_MS);
-	ledc_set_fade_with_time(ledc_channel[3].speed_mode,
-	ledc_channel[3].channel, 0, ramp_ms);
+	ledc_set_fade_with_time(ledc_channel[LEDC_CHANNEL_4].speed_mode,
+	ledc_channel[LEDC_CHANNEL_4].channel, 0, ramp_ms);
 	ledc_fade_start(ledc_channel[3].speed_mode,
-	ledc_channel[3].channel, LEDC_FADE_NO_WAIT);
+	ledc_channel[LEDC_CHANNEL_4].channel, LEDC_FADE_NO_WAIT);
 }
 
 static esp_err_t event_handler(void *ctx, system_event_t *event)
@@ -183,7 +211,7 @@ void toggle_fade_LEDs(int duration_ms)
 	else
 		duty = LEDC_OFF_DUTY;
 
-	for (ch = 0; ch < 3; ch++) {
+	for (ch = 0; ch < 4; ch++) {
 		ledc_set_fade_with_time(ledc_channel[ch].speed_mode,
 				ledc_channel[ch].channel, duty, duration_ms);
 		ledc_fade_start(ledc_channel[ch].speed_mode,
@@ -395,7 +423,7 @@ static void ota_example_task(void *pvParameter)
 
     ESP_LOGI(TAG, "Starting OTA example...");
 
-    for (ch = 0; ch < 3; ch++) {
+    for (ch = 0; ch < 4; ch++) {
 		ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 8000);
 		ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
 	}
@@ -520,7 +548,7 @@ static void ota_example_task(void *pvParameter)
         task_fatal_error();
     }
     ESP_LOGI(TAG, "Prepare to restart system!");
-    for (ch = 0; ch < 3; ch++) {
+    for (ch = 0; ch < 4; ch++) {
     		ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 3000);
     		ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
     	}
@@ -536,22 +564,32 @@ static void charging_task(void *pvParameter)
 	static bool was_charging = false;
 	int ch;
 	static int brightness = 8000;
+	static unsigned int state_of_charge = 0;
 
 	while(1)
 	{
+		// after 1 minute without doing anything useful, power off
+		if(system_seconds() - power_watchdog > 180)
+		{
+			// hardware turn off
+			gpio_set_level(BTN_OUT, 1);
+		}
+
 		if (charging && !was_charging)
 		{
 			ESP_LOGI(TAG, "starting charge power down");
 			was_charging = charging;
 			powerdown_pam(1);
-			for (ch = 0; ch < 3; ch++) {
+			for (ch = 0; ch < 4; ch++) {
 				ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 8192);
 				ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
 			}
 			gpio_set_level(LED2,1);
 			gpio_set_level(LED3,1);
+			gpio_set_level(LED4,1);
 			gpio_set_direction(LED2, GPIO_MODE_OUTPUT);
 			gpio_set_direction(LED3, GPIO_MODE_OUTPUT);
+			gpio_set_direction(LED4, GPIO_MODE_OUTPUT);
 
 			esp_sleep_enable_timer_wakeup(500);
 		}
@@ -559,11 +597,13 @@ static void charging_task(void *pvParameter)
 		if (charging)
 		{
 			//ESP_LOGI(TAG, "charging");
-			unsigned int state_of_charge = soc((soc_measure)FILTERED);
 
 			brightness -= 1;
 			if (brightness < 5000)
+			{
+				state_of_charge = soc((soc_measure)FILTERED);
 				brightness = 8000;
+			}
 
 			if (state_of_charge > 90)
 				brightness = 5000;
@@ -597,6 +637,7 @@ static void i2c_task(void *pvParameter)
 {
 	int32_t pressure;
 	float temperature;
+
 	/* tropospheric properties (0-11km) for standard atmosphere */
 	const double T1 = 15.0 + 273.15;	/* temperature at base height in Kelvin */
 	const double a  = -6.5 / 1000.0;	/* temperature gradient in degrees per metre */
@@ -615,17 +656,24 @@ static void i2c_task(void *pvParameter)
 
 		baroAltitude = (float)((((pow((p / p1), (-(a * R) / g))) * T1) - T1) / a);
 
-		unsigned int state_of_charge = soc((soc_measure)FILTERED);
+		bat_soc = soc((soc_measure)FILTERED);
+		bat_v = voltage();
+		bat_i = current((soc_measure)FILTERED);
+		bat_health = soh((soc_measure)FILTERED);
 
 		vTaskDelay( 100 / portTICK_PERIOD_MS );
 		ESP_LOGI(TAG, "baro alt:%0.3f", (float)baroAltitude);
 		ESP_LOGI(TAG, "baro pres:%d", pressure);
-		ESP_LOGI(TAG, "Bat SOC:%d", state_of_charge);
+		ESP_LOGI(TAG, "Bat SOC:%d", bat_soc);
+
 	}
 }
 static void gps_task(void *pvParameter)
 {
 	#define udpAddress "192.168.20.1"
+	struct timeval prev_tv;
+	struct timeval tv;
+	struct timezone tz;
 	const int udpPort = 44444;
 	static uint32_t lastPvtUpdates = 0;
 	static const char *RX_TASK_TAG = "RX_TASK";
@@ -684,6 +732,18 @@ static void gps_task(void *pvParameter)
 	while(1)
 	{
 		receive(10);
+		gettimeofday(&tv, &tz);
+
+		if(tv.tv_sec - prev_tv.tv_sec > 1)
+		{
+			prev_tv = tv;
+			mavlink_message_t mavlink_msg_out;
+			char mavBuf[256];
+
+			mavlink_msg_tracker_status_pack(0, 0, &mavlink_msg_out, bat_soc, bat_v, bat_i, bat_health, rssi, fw_rev, hw_rev);
+			uint16_t len = mavlink_msg_to_send_buffer((uint8_t *) mavBuf, &mavlink_msg_out);
+			sent_data = sendto(socket_fd, mavBuf, (size_t)len, 0, (struct sockaddr*)&ra, sizeof(ra));
+		}
 
 		if (pvtUpdates > lastPvtUpdates)
 		{
@@ -706,13 +766,14 @@ static void gps_task(void *pvParameter)
 			else
 			{
 				//ESP_LOGI(TAG, "gps update, sent %d bytes on udp",sent_data);
+				power_watchdog = system_seconds();
 
 				if (duty == LEDC_OFF_DUTY)
 					duty = LEDC_BRIGHT_DUTY;
 				else
 					duty = LEDC_OFF_DUTY;
 
-				for (ch = 0; ch < 3; ch++) {
+				for (ch = 0; ch < 4; ch++) {
 					ledc_set_fade_with_time(ledc_channel[ch].speed_mode,
 							ledc_channel[ch].channel, duty, LEDC_TEST_FADE_TIME);
 					ledc_fade_start(ledc_channel[ch].speed_mode,
@@ -733,26 +794,34 @@ void led_init(void)
 	 * Prepare and set configuration of timers
 	 * that will be used by LED Controller
 	 */
-	ledc_timer_config_t ledc_timer = {
+	ledc_timer_config_t ledc_LED_timer = {
 		.duty_resolution = LEDC_TIMER_13_BIT, // resolution of PWM duty
 		.freq_hz = 5000,                      // frequency of PWM signal
 		.speed_mode = LEDC_HIGH_SPEED_MODE,           // timer mode
 		.timer_num = LEDC_TIMER_0            // timer index
 	};
+	ledc_timer_config_t ledc_buzzer_timer = {
+			.duty_resolution = LEDC_TIMER_13_BIT, // resolution of PWM duty
+			.freq_hz = 5000,                      // frequency of PWM signal
+			.speed_mode = LEDC_HIGH_SPEED_MODE,           // timer mode
+			.timer_num = LEDC_TIMER_1            // timer index
+		};
+
 	// Set configuration of timer0 for high speed channels
-	ledc_timer_config(&ledc_timer);
+	ledc_timer_config(&ledc_LED_timer);
+	ledc_timer_config(&ledc_buzzer_timer);
 
 	// Set LED Controller with previously prepared configuration
-	    for (ch = 0; ch < 3; ch++) {
-	        ledc_channel_config(&ledc_channel[ch]);
-	        ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 6000);
-	       	ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
-	    }
-	    // buzzer
-	    ch = 3;
-	    ledc_channel_config(&ledc_channel[ch]);
-	    ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 0);
-	    ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+	for (ch = 0; ch < 4; ch++) {
+		ledc_channel_config(&ledc_channel[ch]);
+		ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 6000);
+		ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+	}
+	// buzzer
+	ch = 4;
+	ledc_channel_config(&ledc_channel[ch]);
+	ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 0);
+	ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
 
 	ledc_fade_func_install(0);
 
@@ -771,6 +840,8 @@ void app_main()
     ESP_ERROR_CHECK( err );
 
     led_init();
+
+    power_watchdog = system_seconds();
 
     while(!gaugeBegin())
 	{
@@ -805,10 +876,12 @@ void app_main()
     // if failed, turn to AP for config/OTA
     if (!join_ap)
     {
+    	power_watchdog = system_seconds();
     	initialise_wifi();
     	xTaskCreate(&ota_example_task, "ota_example_task", 8192, NULL, 5, NULL);
     } else {
 
+    	power_watchdog = system_seconds();
     	ESP_LOGI(TAG, "ms5611 init");
     	ms5611_init();
 
